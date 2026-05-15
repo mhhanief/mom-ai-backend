@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Environment variables (JANGAN di-push ke GitHub!)
+.env
+.env.local
+.env.production
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Build output
+dist/
+build/
