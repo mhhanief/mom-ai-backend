@@ -440,3 +440,135 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
+// ============================================
+// EXPORT MOM WITH TEMPLATE
+// ============================================
+
+const fs = require('fs');
+const path = require('path');
+const JSZip = require('jszip');
+const MOM_TEMPLATE_PATH = path.join(__dirname, 'templates', 'Format_MoM_Clean_v2.docx');
+
+function escapeXml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function parseLines(text) {
+  return String(text || '').split('\n').map(l => l.trim()).filter(l => l.length > 0);
+}
+
+function parseActionItems(text) {
+  const lines = parseLines(text);
+  return lines.map((line, idx) => {
+    const match = line.match(/^(\d+)\.\s*(.+?)\s*-\s*(.+?)\s*-\s*(.+)$/);
+    if (match) {
+      return { no: match[1], pic: match[2].trim(), action: match[3].trim(), date: match[4].trim() };
+    }
+    return { no: String(idx + 1), action: line.replace(/^\d+\.\s*/, ''), pic: '-', date: '-' };
+  });
+}
+
+function participantsCellXml(participants) {
+  const lines = parseLines(participants);
+  return lines.map(p => `
+          <w:p>
+            <w:pPr><w:pStyle w:val="MoMTableCell"/></w:pPr>
+            <w:r><w:t xml:space="preserve">\u2022 ${escapeXml(p)}</w:t></w:r>
+          </w:p>`).join('');
+}
+
+function bulletListXml(text, numId) {
+  const lines = parseLines(text);
+  return lines.map(line => `
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="MoMBody"/>
+        <w:numPr><w:ilvl w:val="0"/><w:numId w:val="${numId}"/></w:numPr>
+      </w:pPr>
+      <w:r><w:t xml:space="preserve">${escapeXml(line.replace(/^[\d]+\.\s*|^[-\u2022*]\s*/, ''))}</w:t></w:r>
+    </w:p>`).join('');
+}
+
+function actionItemRowsXml(actionItems) {
+  const items = parseActionItems(actionItems);
+  return items.map(item => `
+      <w:tr>
+        <w:tc>
+          <w:tcPr><w:tcW w:w="1735" w:type="dxa"/></w:tcPr>
+          <w:p><w:pPr><w:pStyle w:val="MoMTableCell"/></w:pPr>
+          <w:r><w:t>${escapeXml(item.no)}</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr><w:tcW w:w="2305" w:type="dxa"/></w:tcPr>
+          <w:p><w:pPr><w:pStyle w:val="MoMTableCell"/></w:pPr>
+          <w:r><w:t xml:space="preserve">${escapeXml(item.action)}</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr><w:tcW w:w="2300" w:type="dxa"/></w:tcPr>
+          <w:p><w:pPr><w:pStyle w:val="MoMTableCell"/></w:pPr>
+          <w:r><w:t xml:space="preserve">${escapeXml(item.pic)}</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr><w:tcW w:w="2306" w:type="dxa"/></w:tcPr>
+          <w:p><w:pPr><w:pStyle w:val="MoMTableCell"/></w:pPr>
+          <w:r><w:t xml:space="preserve">${escapeXml(item.date)}</w:t></w:r></w:p>
+        </w:tc>
+      </w:tr>`).join('');
+}
+
+app.post('/api/export-mom-word', async (req, res) => {
+  try {
+    const { judul, tanggal, lokasi, partisipan, agenda, pembahasan, kesepakatan, actionItems } = req.body;
+
+    const templateBuffer = fs.readFileSync(MOM_TEMPLATE_PATH);
+    const zip = await JSZip.loadAsync(templateBuffer);
+
+    let xml = await zip.file('word/document.xml').async('string');
+
+    xml = xml.replace(/\[Meeting_Title\]/g, escapeXml(judul));
+    xml = xml.replace(/\[Dates\]/g, escapeXml(tanggal));
+    xml = xml.replace(/\[Location\]/g, escapeXml(lokasi));
+
+    xml = xml.replace(
+      /<w:p>\s*<w:pPr>\s*<w:pStyle w:val="MoMTableCell"\/>\s*<\/w:pPr>\s*<w:r>\s*<w:t>\[List_Participants\]<\/w:t>\s*<\/w:r>\s*<\/w:p>/,
+      participantsCellXml(partisipan)
+    );
+
+    xml = xml.replace(
+      /<w:p>\s*<w:pPr>\s*<w:pStyle w:val="MoMBody"\/>\s*<\/w:pPr>\s*<w:r>\s*<w:t[^>]*>\[Objectives\]<\/w:t>\s*<\/w:r>\s*<\/w:p>/,
+      bulletListXml(agenda, 7)
+    );
+
+    xml = xml.replace(
+      /(<w:p>[\s\S]*?\[Discussion_Point 1\][\s\S]*?<\/w:p>)\s*(<w:p>[\s\S]*?\[Discussion_Point 2\][\s\S]*?<\/w:p>)/,
+      bulletListXml(pembahasan, 7)
+    );
+
+    xml = xml.replace(
+      /<w:p>[\s\S]*?\[Decisions\][\s\S]*?<\/w:p>/,
+      bulletListXml(kesepakatan, 8)
+    );
+
+    xml = xml.replace(
+      /<w:tr>\s*<w:trPr>\s*<w:trHeight w:val="543"\/>\s*<\/w:trPr>[\s\S]*?<\/w:tr>/,
+      actionItemRowsXml(actionItems)
+    );
+
+    zip.file('word/document.xml', xml);
+    const outputBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+
+    res.contentType('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="MoM_${(judul || 'Document').replace(/\s+/g, '_')}_${Date.now()}.docx"`);
+    res.send(outputBuffer);
+
+  } catch (error) {
+    console.error('MoM Word export error:', error.message);
+    res.status(500).json({ error: 'Export MoM to Word failed', message: error.message });
+  }
+});
